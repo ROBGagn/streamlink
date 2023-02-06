@@ -16,7 +16,7 @@ from streamlink.stream.hls import HLSStream
 log = logging.getLogger(__name__)
 
 
-@pluginmatcher(re.compile(r"https://mitelefe\.com/vivo"))
+@pluginmatcher(re.compile(r"https://(?:\w+\.)?mitelefe\.com/vivo"))
 class Telefe(Plugin):
     def _get_streams(self):
         self.title, hls_url = self.session.http.get(
