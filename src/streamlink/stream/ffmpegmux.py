@@ -4,13 +4,13 @@ import re
 import subprocess
 import sys
 import threading
+from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
 from shutil import which
-from typing import List, Optional
+from typing import List, Optional, TextIO, Union
 
 from streamlink import StreamError
-from streamlink.compat import devnull
 from streamlink.stream.stream import Stream, StreamIO
 from streamlink.utils.named_pipe import NamedPipe, NamedPipeBase
 from streamlink.utils.processoutput import ProcessOutput
@@ -32,7 +32,7 @@ class MuxedStream(Stream):
         self,
         session,
         *substreams: Stream,
-        **options
+        **options,
     ):
         """
         :param streamlink.Streamlink session: Streamlink session instance
@@ -86,6 +86,8 @@ class FFMPEGMuxer(StreamIO):
     FFMPEG_VERSION: Optional[str] = None
     FFMPEG_VERSION_TIMEOUT = 4.0
 
+    errorlog: Union[int, TextIO]
+
     @classmethod
     def is_usable(cls, session):
         return cls.command(session) is not None
@@ -131,22 +133,28 @@ class FFMPEGMuxer(StreamIO):
     @staticmethod
     def copy_to_pipe(stream: StreamIO, pipe: NamedPipeBase):
         log.debug(f"Starting copy to pipe: {pipe.path}")
+        # TODO: catch OSError when creating/opening pipe fails and close entire output stream
         pipe.open()
-        while not stream.closed:
+
+        while True:
             try:
                 data = stream.read(8192)
-                if len(data):
-                    pipe.write(data)
-                else:
-                    break
-            except (OSError, ValueError):
-                log.error(f"Pipe copy aborted: {pipe.path}")
+            except (OSError, ValueError) as err:
+                log.error(f"Error while reading from substream: {err}")
                 break
-        try:
+
+            if data == b"":
+                log.debug(f"Pipe copy complete: {pipe.path}")
+                break
+
+            try:
+                pipe.write(data)
+            except OSError as err:
+                log.error(f"Error while writing to pipe {pipe.path}: {err}")
+                break
+
+        with suppress(OSError):
             pipe.close()
-        except OSError:  # might fail closing, but that should be ok for the pipe
-            pass
-        log.debug(f"Pipe copy complete: {pipe.path}")
 
     def __init__(self, session, *streams, **options):
         if not self.is_usable(session):
@@ -170,12 +178,12 @@ class FFMPEGMuxer(StreamIO):
         copyts = session.options.get("ffmpeg-copyts") or options.pop("copyts", False)
         start_at_zero = session.options.get("ffmpeg-start-at-zero") or options.pop("start_at_zero", False)
 
-        self._cmd = [self.command(session), '-nostats', '-y']
+        self._cmd = [self.command(session), "-nostats", "-y"]
         for np in self.pipes:
             self._cmd.extend(["-i", str(np.path)])
 
-        self._cmd.extend(['-c:v', videocodec])
-        self._cmd.extend(['-c:a', audiocodec])
+        self._cmd.extend(["-c:v", videocodec])
+        self._cmd.extend(["-c:a", audiocodec])
 
         for m in maps:
             self._cmd.extend(["-map", str(m)])
@@ -190,17 +198,15 @@ class FFMPEGMuxer(StreamIO):
                 stream_id = ":{0}".format(stream) if stream else ""
                 self._cmd.extend(["-metadata{0}".format(stream_id), datum])
 
-        self._cmd.extend(['-f', ofmt, outpath])
-        log.debug("ffmpeg command: {0}".format(' '.join(self._cmd)))
-        self.close_errorlog = False
+        self._cmd.extend(["-f", ofmt, outpath])
+        log.debug("ffmpeg command: {0}".format(" ".join(self._cmd)))
 
-        if session.options.get("ffmpeg-verbose"):
-            self.errorlog = sys.stderr
-        elif session.options.get("ffmpeg-verbose-path"):
+        if session.options.get("ffmpeg-verbose-path"):
             self.errorlog = Path(session.options.get("ffmpeg-verbose-path")).expanduser().open("w")
-            self.close_errorlog = True
+        elif session.options.get("ffmpeg-verbose"):
+            self.errorlog = sys.stderr
         else:
-            self.errorlog = devnull()
+            self.errorlog = subprocess.DEVNULL
 
     def open(self):
         for t in self.pipe_threads:
@@ -223,20 +229,28 @@ class FFMPEGMuxer(StreamIO):
             self.process.kill()
             self.process.stdout.close()
 
-            # close the streams
             executor = concurrent.futures.ThreadPoolExecutor()
+
+            # close the substreams
             futures = [
                 executor.submit(stream.close)
                 for stream in self.streams
                 if hasattr(stream, "close") and callable(stream.close)
             ]
-
             concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
             log.debug("Closed all the substreams")
 
-        if self.close_errorlog:
-            self.errorlog.close()
-            self.errorlog = None
+            # wait for substream copy-to-pipe threads to terminate and clean up the opened pipes
+            timeout = self.session.options.get("stream-timeout")
+            futures = [
+                executor.submit(thread.join, timeout=timeout)
+                for thread in self.pipe_threads
+            ]
+            concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
+
+        if self.errorlog is not sys.stderr and self.errorlog is not subprocess.DEVNULL:
+            with suppress(OSError):
+                self.errorlog.close()
 
         super().close()
 

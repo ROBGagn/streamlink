@@ -6,6 +6,7 @@ from lxml.etree import Element, tostring as etree_tostring
 
 from streamlink.exceptions import PluginError, StreamlinkDeprecationWarning
 from streamlink.plugin.api import validate
+
 # noinspection PyProtectedMember
 from streamlink.plugin.api.validate._exception import ValidationError
 
@@ -107,7 +108,7 @@ class TestType:
 
 class TestSequence:
     @pytest.mark.parametrize(
-        "schema, value",
+        ("schema", "value"),
         [
             ([3, 2, 1, 0], [1, 2]),
             ((3, 2, 1, 0), (1, 2)),
@@ -160,7 +161,7 @@ class TestDict:
         assert result is not value
 
     @pytest.mark.parametrize(
-        "value, expected",
+        ("value", "expected"),
         [
             ({"foo": "foo"}, {"foo": "foo"}),
             ({"bar": "bar"}, {}),
@@ -168,13 +169,13 @@ class TestDict:
         ids=[
             "existing",
             "missing",
-        ]
+        ],
     )
     def test_optional(self, value, expected):
         assert validate.validate({validate.optional("foo"): "foo"}, value) == expected
 
     @pytest.mark.parametrize(
-        "schema, value, expected",
+        ("schema", "value", "expected"),
         [
             (
                 {str: {int: str}},
@@ -279,7 +280,7 @@ class TestCallable:
 
 
 class TestPattern:
-    @pytest.mark.parametrize("pattern,data,expected", [
+    @pytest.mark.parametrize(("pattern", "data", "expected"), [
         (r"\s(?P<bar>\S+)\s", "foo bar baz", {"bar": "bar"}),
         (rb"\s(?P<bar>\S+)\s", b"foo bar baz", {"bar": b"bar"}),
     ])
@@ -331,35 +332,35 @@ class TestAllSchema:
         assert validate.validate(schema, "foo") == "foo"
 
     @pytest.mark.parametrize(
-        "value, error",
+        ("value", "error"),
         [
             (
                 123,
                 """
                     ValidationError(type):
                       Type of 123 should be str, but is int
-                """
+                """,
             ),
             (
                 "bar",
                 """
                     ValidationError(Callable):
                       <lambda>('bar') is not true
-                """
+                """,
             ),
             (
                 "failure",
                 """
                     ValidationError(equality):
                       'failure' does not equal 'foo'
-                """
+                """,
             ),
         ],
         ids=[
             "first",
             "second",
             "third",
-        ]
+        ],
     )
     def test_failure(self, schema, value, error):
         with pytest.raises(ValidationError) as cm:
@@ -387,7 +388,7 @@ class TestAnySchema:
             "first",
             "second",
             "third",
-        ]
+        ],
     )
     def test_success(self, schema, value):
         assert validate.validate(schema, value) is value
@@ -407,7 +408,7 @@ class TestAnySchema:
 
 
 class TestNoneOrAllSchema:
-    @pytest.mark.parametrize("data,expected", [("foo", "FOO"), ("bar", None)])
+    @pytest.mark.parametrize(("data", "expected"), [("foo", "FOO"), ("bar", None)])
     def test_success(self, data, expected):
         assert validate.validate(
             validate.Schema(
@@ -483,7 +484,7 @@ class TestListSchema:
 
 
 class TestRegexSchema:
-    @pytest.mark.parametrize("pattern,data,expected", [
+    @pytest.mark.parametrize(("pattern", "data", "expected"), [
         (r"\s(?P<bar>\S+)\s", "foo bar baz", {"bar": "bar"}),
         (rb"\s(?P<bar>\S+)\s", b"foo bar baz", {"bar": b"bar"}),
     ])
@@ -626,7 +627,7 @@ class TestGetItemSchema:
     def test_strict(self):
         dictionary = {
             ("foo", "bar", "baz"): "foo-bar-baz",
-            "foo": {"bar": {"baz": "qux"}}
+            "foo": {"bar": {"baz": "qux"}},
         }
         assert validate.validate(validate.get(("foo", "bar", "baz"), strict=True), dictionary) == "foo-bar-baz"
 
@@ -639,7 +640,7 @@ class TestAttrSchema:
         def __repr__(self):
             return self.__class__.__name__
 
-    @pytest.fixture(scope="function")
+    @pytest.fixture()
     def obj(self):
         obj1 = self.Subject()
         obj2 = self.Subject()
@@ -677,7 +678,7 @@ class TestAttrSchema:
 class TestXmlElementSchema:
     upper = validate.transform(str.upper)
 
-    @pytest.fixture(scope="function")
+    @pytest.fixture()
     def element(self):
         childA = Element("childA", {"a": "1"})
         childB = Element("childB", {"b": "2"})
@@ -697,32 +698,32 @@ class TestXmlElementSchema:
         return parent
 
     @pytest.mark.parametrize(
-        "schema, expected",
+        ("schema", "expected"),
         [
             (
                 validate.xml_element(),
                 (
                     "<parent attrkey1=\"attrval1\" attrkey2=\"attrval2\">"
-                    "parenttext"
-                    "<childA a=\"1\">childAtext</childA>"
-                    "childAtail"
-                    "<childB b=\"2\">childBtext<childC/></childB>"
-                    "childBtail"
-                    "</parent>"
-                    "parenttail"
+                    + "parenttext"
+                    + "<childA a=\"1\">childAtext</childA>"
+                    + "childAtail"
+                    + "<childB b=\"2\">childBtext<childC/></childB>"
+                    + "childBtail"
+                    + "</parent>"
+                    + "parenttail"
                 ),
             ),
             (
                 validate.xml_element(tag=upper, attrib={upper: upper}, text=upper, tail=upper),
                 (
                     "<PARENT ATTRKEY1=\"ATTRVAL1\" ATTRKEY2=\"ATTRVAL2\">"
-                    "PARENTTEXT"
-                    "<childA a=\"1\">childAtext</childA>"
-                    "childAtail"
-                    "<childB b=\"2\">childBtext<childC/></childB>"
-                    "childBtail"
-                    "</PARENT>"
-                    "PARENTTAIL"
+                    + "PARENTTEXT"
+                    + "<childA a=\"1\">childAtext</childA>"
+                    + "childAtail"
+                    + "<childB b=\"2\">childBtext<childC/></childB>"
+                    + "childBtail"
+                    + "</PARENT>"
+                    + "PARENTTAIL"
                 ),
             ),
         ],
@@ -740,7 +741,7 @@ class TestXmlElementSchema:
         assert newelement[1][0] is not element[1][0]
 
     @pytest.mark.parametrize(
-        "schema, error",
+        ("schema", "error"),
         [
             (
                 validate.xml_element(tag="invalid"),
@@ -784,7 +785,7 @@ class TestXmlElementSchema:
             "attrib",
             "text",
             "tail",
-        ]
+        ],
     )
     def test_failure(self, element, schema, error):
         with pytest.raises(ValidationError) as cm:
@@ -847,7 +848,7 @@ class TestUnionSchema:
         """)
 
     @pytest.mark.parametrize(
-        "schema, expected",
+        ("schema", "expected"),
         [
             (validate.union([str, upper]), ["value", "VALUE"]),
             (validate.union((str, upper)), ("value", "VALUE")),
@@ -878,15 +879,15 @@ class TestUnionSchema:
 
 class TestLengthValidator:
     @pytest.mark.parametrize(
-        "minlength, value",
-        [(3, "foo"), (3, [1, 2, 3])]
+        ("minlength", "value"),
+        [(3, "foo"), (3, [1, 2, 3])],
     )
     def test_success(self, minlength, value):
         assert validate.validate(validate.length(minlength), value)
 
     @pytest.mark.parametrize(
-        "minlength, value",
-        [(3, "foo"), (3, [1, 2, 3])]
+        ("minlength", "value"),
+        [(3, "foo"), (3, [1, 2, 3])],
     )
     def test_failure(self, minlength, value):
         with pytest.raises(ValidationError) as cm:
@@ -1042,7 +1043,7 @@ class TestHasAttrValidator:
         def __repr__(self):
             return self.__class__.__name__
 
-    def test_success(self,):
+    def test_success(self):
         assert validate.validate(validate.hasattr("foo"), self.Subject())
 
     def test_failure(self):
@@ -1424,13 +1425,13 @@ class TestValidationError:
         err = ValidationError(
             ValidationError(
                 "foo",
-                schema=dict
+                schema=dict,
             ),
             ValidationError(
                 "bar",
-                schema="something"
+                schema="something",
             ),
-            schema=validate.any
+            schema=validate.any,
         )
         assert_validationerror(err, """
             ValidationError(AnySchema):

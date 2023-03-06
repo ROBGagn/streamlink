@@ -10,14 +10,17 @@ from typing import Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
 from streamlink import PluginError, StreamError
-from streamlink.stream.dash_manifest import MPD, Representation, Segment, freeze_timeline, utc
+from streamlink.stream.dash_manifest import MPD, Representation, Segment, freeze_timeline
 from streamlink.stream.ffmpegmux import FFMPEGMuxer
 from streamlink.stream.segmented import SegmentedStreamReader, SegmentedStreamWorker, SegmentedStreamWriter
 from streamlink.stream.stream import Stream
 from streamlink.utils.l10n import Language
 from streamlink.utils.parse import parse_xml
 
+
 log = logging.getLogger(__name__)
+
+UTC = datetime.timezone.utc
 
 
 class DASHStreamWriter(SegmentedStreamWriter):
@@ -28,48 +31,47 @@ class DASHStreamWriter(SegmentedStreamWriter):
     def _get_segment_name(segment: Segment) -> str:
         return Path(urlparse(segment.url).path).resolve().name
 
-    def fetch(self, segment, retries=None):
+    def fetch(self, segment: Segment, retries: Optional[int] = None):
         if self.closed or not retries:
             return
 
         try:
             request_args = copy.deepcopy(self.reader.stream.args)
             headers = request_args.pop("headers", {})
-            now = datetime.datetime.now(tz=utc)
+            now = datetime.datetime.now(tz=UTC)
             if segment.available_at > now:
                 time_to_wait = (segment.available_at - now).total_seconds()
                 fname = self._get_segment_name(segment)
-                log.debug(f"Waiting for segment: {fname} ({time_to_wait:.01f}s)")
+                log.debug(f"Waiting for {self.reader.mime_type} segment: {fname} ({time_to_wait:.01f}s)")
                 if not self.wait(time_to_wait):
-                    log.debug(f"Waiting for segment: {fname} aborted")
+                    log.debug(f"Waiting for {self.reader.mime_type} segment: {fname} aborted")
                     return
 
-            if segment.range:
-                start, length = segment.range
-                if length:
-                    end = start + length - 1
-                else:
-                    end = ""
+            if segment.byterange:
+                start, length = segment.byterange
+                end = str(start + length - 1) if length else ""
                 headers["Range"] = f"bytes={start}-{end}"
 
-            return self.session.http.get(segment.url,
-                                         timeout=self.timeout,
-                                         exception=StreamError,
-                                         headers=headers,
-                                         **request_args)
+            return self.session.http.get(
+                segment.url,
+                timeout=self.timeout,
+                exception=StreamError,
+                headers=headers,
+                **request_args,
+            )
         except StreamError as err:
-            log.error(f"Failed to open segment {segment.url}: {err}")
+            log.error(f"Failed to open {self.reader.mime_type} segment {segment.url}: {err}")
             return self.fetch(segment, retries - 1)
 
     def write(self, segment, res, chunk_size=8192):
         name = self._get_segment_name(segment)
         for chunk in res.iter_content(chunk_size):
             if self.closed:
-                log.warning(f"Download of segment: {name} aborted")
+                log.warning(f"Download of {self.reader.mime_type} segment: {name} aborted")
                 return
             self.reader.buffer.write(chunk)
 
-        log.debug(f"Download of segment: {name} complete")
+        log.debug(f"Download of {self.reader.mime_type} segment: {name} complete")
 
 
 class DASHStreamWorker(SegmentedStreamWorker):
@@ -82,6 +84,8 @@ class DASHStreamWorker(SegmentedStreamWorker):
         self.mpd = self.stream.mpd
         self.period = self.stream.period
 
+        self.manifest_reload_retries = self.session.options.get("dash-manifest-reload-attempts")
+
     @contextmanager
     def sleeper(self, duration):
         """
@@ -93,11 +97,10 @@ class DASHStreamWorker(SegmentedStreamWorker):
         if time_to_sleep > 0:
             self.wait(time_to_sleep)
 
-    @staticmethod
-    def get_representation(mpd, representation_id, mime_type):
-        for aset in mpd.periods[0].adaptationSets:
+    def get_representation(self, mpd, ident):
+        for aset in mpd.periods[self.period].adaptationSets:
             for rep in aset.representations:
-                if rep.id == representation_id and rep.mimeType == mime_type:
+                if rep.ident == ident:
                     return rep
 
     def iter_segments(self):
@@ -105,14 +108,14 @@ class DASHStreamWorker(SegmentedStreamWorker):
         back_off_factor = 1
         while not self.closed:
             # find the representation by ID
-            representation = self.get_representation(self.mpd, self.reader.representation_id, self.reader.mime_type)
+            representation = self.get_representation(self.mpd, self.reader.ident)
 
             if self.mpd.type == "static":
                 refresh_wait = 5
             else:
                 refresh_wait = max(
                     self.mpd.minimumUpdatePeriod.total_seconds(),
-                    self.mpd.periods[0].duration.total_seconds(),
+                    self.mpd.periods[self.period].duration.total_seconds(),
                 ) or 5
 
             with self.sleeper(refresh_wait * back_off_factor):
@@ -141,15 +144,22 @@ class DASHStreamWorker(SegmentedStreamWorker):
             return
 
         self.reader.buffer.wait_free()
-        log.debug("Reloading manifest ({0}:{1})".format(self.reader.representation_id, self.reader.mime_type))
-        res = self.session.http.get(self.mpd.url, exception=StreamError, **self.stream.args)
+        log.debug(f"Reloading manifest {self.reader.ident!r}")
+        res = self.session.http.get(
+            self.mpd.url,
+            exception=StreamError,
+            retries=self.manifest_reload_retries,
+            **self.stream.args,
+        )
 
-        new_mpd = MPD(self.session.http.xml(res, ignore_ns=True),
-                      base_url=self.mpd.base_url,
-                      url=self.mpd.url,
-                      timelines=self.mpd.timelines)
+        new_mpd = MPD(
+            self.session.http.xml(res, ignore_ns=True),
+            base_url=self.mpd.base_url,
+            url=self.mpd.url,
+            timelines=self.mpd.timelines,
+        )
 
-        new_rep = self.get_representation(new_mpd, self.reader.representation_id, self.reader.mime_type)
+        new_rep = self.get_representation(new_mpd, self.reader.ident)
         with freeze_timeline(new_mpd):
             changed = len(list(itertools.islice(new_rep.segments(), 1))) > 0
 
@@ -167,11 +177,10 @@ class DASHStreamReader(SegmentedStreamReader):
     writer: "DASHStreamWriter"
     stream: "DASHStream"
 
-    def __init__(self, stream: "DASHStream", representation_id, mime_type, *args, **kwargs):
+    def __init__(self, stream: "DASHStream", representation: Representation, *args, **kwargs):
         super().__init__(stream, *args, **kwargs)
-        self.mime_type = mime_type
-        self.representation_id = representation_id
-        log.debug("Opening DASH reader for: {0} ({1})".format(self.representation_id, self.mime_type))
+        self.ident = representation.ident
+        self.mime_type = representation.mimeType
 
 
 class DASHStream(Stream):
@@ -188,7 +197,7 @@ class DASHStream(Stream):
         video_representation: Optional[Representation] = None,
         audio_representation: Optional[Representation] = None,
         period: float = 0,
-        **args
+        **args,
     ):
         """
         :param streamlink.Streamlink session: Streamlink session instance
@@ -233,7 +242,7 @@ class DASHStream(Stream):
         cls,
         session,
         url_or_manifest: str,
-        **args
+        **args,
     ) -> Dict[str, "DASHStream"]:
         """
         Parse a DASH manifest file and return its streams.
@@ -243,10 +252,15 @@ class DASHStream(Stream):
         :param args: Additional keyword arguments passed to :meth:`requests.Session.request`
         """
 
-        if url_or_manifest.startswith('<?xml'):
+        if url_or_manifest.startswith("<?xml"):
             mpd = MPD(parse_xml(url_or_manifest, ignore_ns=True))
         else:
-            res = session.http.get(url_or_manifest, **session.http.valid_request_args(**args))
+            retries = session.options.get("dash-manifest-reload-attempts")
+            res = session.http.get(
+                url_or_manifest,
+                retries=retries,
+                **session.http.valid_request_args(**args),
+            )
             url = res.url
 
             urlp = list(urlparse(url))
@@ -259,8 +273,10 @@ class DASHStream(Stream):
         # Search for suitable video and audio representations
         for aset in mpd.periods[0].adaptationSets:
             if aset.contentProtection:
-                raise PluginError("{} is protected by DRM".format(url))
+                raise PluginError(f"{url} is protected by DRM")
             for rep in aset.representations:
+                if rep.contentProtection:
+                    raise PluginError(f"{url} is protected by DRM")
                 if rep.mimeType.startswith("video"):
                     video.append(rep)
                 elif rep.mimeType.startswith("audio"):
@@ -293,7 +309,7 @@ class DASHStream(Stream):
 
         log.debug("Available languages for DASH audio streams: {0} (using: {1})".format(
             ", ".join(available_languages) or "NONE",
-            lang or "n/a"
+            lang or "n/a",
         ))
 
         # if the language is given by the stream, filter out other languages that do not match
@@ -309,7 +325,7 @@ class DASHStream(Stream):
                 stream_name.append("{:0.0f}{}".format(vid.height or vid.bandwidth_rounded, "p" if vid.height else "k"))
             if audio and len(audio) > 1:
                 stream_name.append("a{:0.0f}k".format(aud.bandwidth))
-            ret.append(('+'.join(stream_name), stream))
+            ret.append(("+".join(stream_name), stream))
 
         # rename duplicate streams
         dict_value_list = defaultdict(list)
@@ -336,23 +352,28 @@ class DASHStream(Stream):
                 if n == 0:
                     ret_new[q] = items[n]
                 elif n == 1:
-                    ret_new[f'{q}_alt'] = items[n]
+                    ret_new[f"{q}_alt"] = items[n]
                 else:
-                    ret_new[f'{q}_alt{n}'] = items[n]
+                    ret_new[f"{q}_alt{n}"] = items[n]
         return ret_new
 
     def open(self):
-        if self.video_representation:
-            video = DASHStreamReader(self, self.video_representation.id, self.video_representation.mimeType)
+        video, audio = None, None
+        rep_video, rep_audio = self.video_representation, self.audio_representation
+
+        if rep_video:
+            video = DASHStreamReader(self, rep_video)
+            log.debug(f"Opening DASH reader for: {rep_video.ident!r} - {rep_video.mimeType}")
             video.open()
 
-        if self.audio_representation:
-            audio = DASHStreamReader(self, self.audio_representation.id, self.audio_representation.mimeType)
+        if rep_audio:
+            audio = DASHStreamReader(self, rep_audio)
+            log.debug(f"Opening DASH reader for: {rep_audio.ident!r} - {rep_audio.mimeType}")
             audio.open()
 
-        if self.video_representation and self.audio_representation:
+        if video and audio:
             return FFMPEGMuxer(self.session, video, audio, copyts=True).open()
-        elif self.video_representation:
+        elif video:
             return video
-        elif self.audio_representation:
+        elif audio:
             return audio

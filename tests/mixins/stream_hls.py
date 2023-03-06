@@ -31,7 +31,7 @@ class Playlist(HLSItemBase):
         self.items = [
             Tag("EXTM3U"),
             Tag("EXT-X-VERSION", int(version)),
-            Tag("EXT-X-TARGETDURATION", int(targetduration))
+            Tag("EXT-X-TARGETDURATION", int(targetduration)),
         ]
         if mediasequence is not None:  # pragma: no branch
             self.items.append(Tag("EXT-X-MEDIA-SEQUENCE", int(mediasequence)))
@@ -85,7 +85,7 @@ class Segment(HLSItemBase):
         return "#EXTINF:{duration:.3f},{title}\n{path}".format(
             duration=self.duration,
             title=self.title,
-            path=self.path if self.path_relative else self.url(namespace)
+            path=self.path if self.path_relative else self.url(namespace),
         )
 
 
@@ -220,7 +220,7 @@ class TestMixinStreamHLS(unittest.TestCase):
         thread.reader.writer.join(timeout)
         thread.reader.worker.join(timeout)
         thread.join(timeout)
-        self.assertTrue(self.thread.reader.closed, "Stream reader is closed")
+        assert self.thread.reader.closed, "Stream reader is closed"
 
     # make write calls on the write-thread and wait until it has finished
     def await_write(self, write_calls=1, timeout=TIMEOUT_AWAIT_WRITE) -> None:
